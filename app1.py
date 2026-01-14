@@ -19,9 +19,13 @@ from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 
-# Load environment variables
-load_dotenv()
-os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
+
+if "HF_TOKEN" in st.secrets:
+    os.environ['HF_TOKEN'] = st.secrets["HF_TOKEN"]
+else:
+    # Fallback only if secrets are missing (prevents the NoneType crash)
+    os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN", "")
+
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 def analyze_handwritten_pdf(uploaded_file, api_key):
