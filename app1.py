@@ -18,7 +18,8 @@ import base64
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from langchain_core.documents import Document
-
+import io    
+from PIL import Image 
 
 if "HF_TOKEN" in st.secrets:
     os.environ['HF_TOKEN'] = st.secrets["HF_TOKEN"]
@@ -39,49 +40,75 @@ embeddings = HuggingFaceEmbeddings(
 def analyze_handwritten_pdf(uploaded_file, api_key):
     vision_llm = ChatGroq(
         groq_api_key=api_key, 
-        model_name="meta-llama/llama-4-scout-17b-16e-instruct" 
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct"
     )
     
+    # Read file stream
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     results = []
-    full_extracted_text = ""  # New variable to store raw text
+    full_extracted_text = "" 
 
     status_container = st.empty()
     status_container.info(f"Analyzing {len(doc)} page(s)...")
 
     for page_num, page in enumerate(doc):
-        pix = page.get_pixmap()
-        img_data = pix.tobytes("png")
-        base64_image = base64.b64encode(img_data).decode("utf-8")
-
-        prompt = (
-            "Transcribe ALL handwritten text on this page accurately. "
-            "Then, grade the answers found. "
-            "Return the output as plain text."
-        )
-
-        msg = HumanMessage(
-            content=[
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
-            ]
-        )
-
         try:
+            # --- STEP 1: RESIZE (Manage Dimensions) ---
+            # Get default pixmap first to check size
+            pix = page.get_pixmap()
+
+            # If wider than 1024px, scale it down
+            if pix.width > 1024:
+                zoom = 1024 / pix.width
+                matrix = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=matrix, alpha=False) # alpha=False forces RGB (no transparency)
+            else:
+                pix = page.get_pixmap(alpha=False) # alpha=False forces RGB
+
+            # --- STEP 2: COMPRESS (Manage File Size) ---
+            # Use PIL (Pillow) to handle the compression safely
+            # 1. Create a PIL Image from the raw fitz data
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # 2. Save compressed JPEG to a memory buffer
+            buffer = io.BytesIO()
+            img.save(buffer, format="JPEG", quality=70) # Standard PIL compression
+            img_data = buffer.getvalue()
+            
+            # 3. Encode to Base64
+            base64_image = base64.b64encode(img_data).decode("utf-8")
+
+            # --- STEP 3: SEND TO AI ---
+            prompt = (
+                "Transcribe ALL handwritten text on this page accurately. "
+                "Then, grade the answers found. "
+                "Return the output as plain text."
+            )
+
+            msg = HumanMessage(
+                content=[
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url", 
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                    }
+                ]
+            )
+
             response = vision_llm.invoke([msg])
             page_content = response.content
             
-            # Save the result for display
             results.append(f"**Page {page_num + 1}:**\n{page_content}")
-            
-            # Save the result for the database (The Bridge)
             full_extracted_text += f"\n\n--- Page {page_num + 1} Handwriting Analysis ---\n{page_content}"
-            
+
         except Exception as e:
-            results.append(f"Error: {str(e)}")
+            # Capture errors specifically per page so one bad page doesn't kill the whole app
+            error_msg = f"Error on page {page_num + 1}: {str(e)}"
+            print(error_msg) # Print to console for debugging
+            results.append(error_msg)
     
     status_container.empty()
-    return results, full_extracted_text  # Return both.
+    return results, full_extracted_text
 
 # --- MAIN APP ---
 st.title("PDF Chatbot with Handwriting Analysis")
@@ -116,6 +143,27 @@ session_id = st.text_input("Session ID", value="default_session")
 # PDF Uploader
 uploaded_files = st.file_uploader("Choose PDF files", type="pdf", accept_multiple_files=True)
 
+
+if uploaded_files:
+    # Get the names of the currently uploaded files
+    current_names = sorted([f.name for f in uploaded_files])
+    
+    # Check if these are different from what we processed last time
+    if "processed_file_list" not in st.session_state or st.session_state.processed_file_list != current_names:
+        st.info("🔄 New files detected! Clearing previous memory...")
+        
+        # 1. Delete the old VectorStore (The Brain)
+        if "vectorstore" in st.session_state:
+            del st.session_state.vectorstore
+            
+        # 2. Delete the old Chat History
+        if "store" in st.session_state:
+            st.session_state.store = {}
+            
+        # 3. Update the tracker to the new files
+        st.session_state.processed_file_list = current_names
+
+
 # 1. PROCESS PDFS (Only runs once per upload)
 if uploaded_files:
     if "vectorstore" not in st.session_state:
@@ -138,7 +186,7 @@ if uploaded_files:
             st.warning("⚠️ No digital text found! This appears to be a handwritten or scanned PDF. You can use the 'Analyze Handwriting' button above to extract handwritten text.")
         else:
             # Only proceed to splitting and embedding if text exists
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             splits = text_splitter.split_documents(documents)
             
             if len(splits) > 0:
@@ -149,7 +197,7 @@ if uploaded_files:
         
 
     # 2. HANDWRITING ANALYSIS BUTTON
-    with st.expander("📝 Analyze Handwritten Content (Vision AI)"):
+    with st.expander("📝 Analyze Handwritten Content"):
         if st.button("Run Handwriting Analysis"):
             for uploaded_file in uploaded_files:
                 st.write(f"Analyzing: {uploaded_file.name}")
@@ -170,6 +218,11 @@ if uploaded_files:
                         page_content=raw_vision_text, 
                         metadata={"source": f"handwriting_{uploaded_file.name}"}
                     )
+
+                    if 'text_splitter' not in locals():
+                         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+                    vision_splits = text_splitter.split_documents([vision_doc])
                     
                     # Add to VectorStore
                     if "vectorstore" not in st.session_state:
@@ -187,7 +240,7 @@ if uploaded_files:
     # 3. CHAT INTERFACE
     # Ensure we have a vectorstore before trying to chat
     if "vectorstore" in st.session_state:
-        retriever = st.session_state.vectorstore.as_retriever()
+        retriever = st.session_state.vectorstore.as_retriever(search_kwargs={"k": 2})
 
         contextualize_q_system_prompt = (
             "Given a chat history and the latest user question "
