@@ -26,7 +26,15 @@ else:
     # Fallback only if secrets are missing (prevents the NoneType crash)
     os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN", "")
 
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+# Force the model to run on CPU to avoid the "meta tensor" error
+model_kwargs = {'device': 'cpu'}
+encode_kwargs = {'normalize_embeddings': True}
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="all-MiniLM-L6-v2",
+    model_kwargs=model_kwargs,
+    encode_kwargs=encode_kwargs
+)
 
 def analyze_handwritten_pdf(uploaded_file, api_key):
     vision_llm = ChatGroq(

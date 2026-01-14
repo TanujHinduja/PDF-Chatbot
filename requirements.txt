@@ -11,3 +11,6 @@ pypdf
 pymupdf
 chromadb
 sentence-transformers
+accelerate
+tf-keras
+torch
