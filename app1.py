@@ -135,7 +135,7 @@ if uploaded_files:
 
         # 2. Check if text was actually found
         if len(documents) == 0 or not any(doc.page_content.strip() for doc in documents):
-            st.warning("⚠️ No digital text found! This appears to be a handwritten or scanned PDF. You can use the 'Analyze Handwriting' button above, but standard Chat (RAG) will not work unless you OCR the file first.")
+            st.warning("⚠️ No digital text found! This appears to be a handwritten or scanned PDF. You can use the 'Analyze Handwriting' button above to extract handwritten text.")
         else:
             # Only proceed to splitting and embedding if text exists
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
