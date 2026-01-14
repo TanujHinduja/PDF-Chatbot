@@ -88,13 +88,20 @@ st.title("PDF Chatbot with Handwriting Analysis")
 st.write("Upload Pdf's and chat with their content")
 
 
-# Try to get the key from Streamlit secrets
-try:
+# --- API KEY LOADING ---
+api_key = None
+
+# 1. Try to get the key from Streamlit Secrets
+if "GROQ_API_KEY" in st.secrets:
     api_key = st.secrets["GROQ_API_KEY"]
-except (FileNotFoundError, KeyError):
-    # Fallback for local testing if secrets file is missing (optional)
+else:
+    # 2. If not in secrets, ask the user
     api_key = st.text_input("Enter your Groq API key:", type="password")
 
+# 3. CRITICAL FIX: Stop the app if the key is missing
+if not api_key:
+    st.info("⚠️ Please enter your Groq API key above to continue.")
+    st.stop()  # <--- This stops the app here until a key is entered
 
 
 # Initialize Main LLM
