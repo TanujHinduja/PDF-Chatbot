@@ -14,5 +14,5 @@ sentence-transformers
 accelerate
 tf-keras
 torch
-
+supabase
 protobuf<=3.20.3
