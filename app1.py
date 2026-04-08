@@ -1,4 +1,4 @@
-## RAG Q&A Conversation With PDF- HANDWRITTEN also Including Chat History
+## RAG Q&A Conversation With PDF- HANDWRITTEN also Including Chat History Along with DATA storing at SUPABASE
 
 import streamlit as st
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
@@ -19,7 +19,11 @@ from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 import io    
-from PIL import Image 
+from PIL import Image
+
+from supabase import create_client, Client
+from datetime import datetime
+
 
 if "HF_TOKEN" in st.secrets:
     os.environ['HF_TOKEN'] = st.secrets["HF_TOKEN"]
@@ -37,6 +41,57 @@ embeddings = HuggingFaceEmbeddings(
     encode_kwargs=encode_kwargs
 )
 
+class CloudLogger:
+    def __init__(self):
+        # TRY/EXCEPT block to prevent app crashing if secrets are missing
+        try:
+            url = st.secrets["SUPABASE_URL"]
+            key = st.secrets["SUPABASE_KEY"]
+            self.supabase: Client = create_client(url, key)
+            self.enabled = True
+        except Exception as e:
+            st.warning("⚠️ Supabase secrets not found. Logging is disabled.")
+            self.enabled = False
+
+    def log_upload(self, file_bytes, filename):
+        if not self.enabled: return
+        try:
+            # 1. Create unique name to prevent overwrites
+            unique_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
+
+            # 2. Upload File to Storage Bucket named 'pdf_uploads'
+            self.supabase.storage.from_("pdf_uploads").upload(
+                path=unique_name,
+                file=file_bytes,
+                file_options={"content-type": "application/pdf"}
+            )
+            # 3. Log Metadata to Database Table 'documents'
+            self.supabase.table("documents").insert({
+                "filename": filename,
+                "storage_path": unique_name,
+                "upload_time": datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            print(f"Upload Log Error: {e}")
+
+    def log_question(self, question, session_id, file_list):
+        if not self.enabled: return
+        try:
+            # Convert list of files like ['a.pdf', 'b.pdf'] into a single string "a.pdf, b.pdf"
+            files_string = ", ".join(file_list)
+
+            self.supabase.table("chat_logs").insert({
+                "question": question,
+                "session_id": session_id,
+                "sources": files_string, # <--- NEW FIELD
+                "timestamp": datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            print(f"Chat Log Error: {e}")
+
+# Initialize Logger
+cloud_logger = CloudLogger()
+
 def analyze_handwritten_pdf(uploaded_file, api_key):
     vision_llm = ChatGroq(
         groq_api_key=api_key, 
@@ -53,7 +108,7 @@ def analyze_handwritten_pdf(uploaded_file, api_key):
 
     for page_num, page in enumerate(doc):
         try:
-            # --- STEP 1: RESIZE (Manage Dimensions) ---
+            # STEP 1: RESIZE (Manage Dimensions) 
             # Get default pixmap first to check size
             pix = page.get_pixmap()
 
@@ -65,7 +120,7 @@ def analyze_handwritten_pdf(uploaded_file, api_key):
             else:
                 pix = page.get_pixmap(alpha=False) # alpha=False forces RGB
 
-            # --- STEP 2: COMPRESS (Manage File Size) ---
+            # STEP 2: COMPRESS (Manage File Size) 
             # Use PIL (Pillow) to handle the compression safely
             # 1. Create a PIL Image from the raw fitz data
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -78,7 +133,7 @@ def analyze_handwritten_pdf(uploaded_file, api_key):
             # 3. Encode to Base64
             base64_image = base64.b64encode(img_data).decode("utf-8")
 
-            # --- STEP 3: SEND TO AI ---
+            # STEP 3: SEND TO AI
             prompt = (
                 "Transcribe ALL handwritten text on this page accurately. "
                 "Then, grade the answers found. "
@@ -110,12 +165,12 @@ def analyze_handwritten_pdf(uploaded_file, api_key):
     status_container.empty()
     return results, full_extracted_text
 
-# --- MAIN APP ---
+# MAIN APP
 st.title("PDF Chatbot with Handwriting Analysis")
 st.write("Upload Pdf's and chat with their content")
 
 
-# --- API KEY LOADING ---
+# API KEY LOADING 
 api_key = None
 
 # 1. Try to get the key from Streamlit Secrets
@@ -128,7 +183,7 @@ else:
 # 3. CRITICAL FIX: Stop the app if the key is missing
 if not api_key:
     st.info("⚠️ Please enter your Groq API key above to continue.")
-    st.stop()  # <--- This stops the app here until a key is entered
+    st.stop()  # stops the app here until a key is entered
 
 
 # Initialize Main LLM
@@ -163,6 +218,9 @@ if uploaded_files:
         # 3. Update the tracker to the new files
         st.session_state.processed_file_list = current_names
 
+        # 4. Reset the "Uploaded to Cloud" Checklist
+        st.session_state.uploaded_to_cloud = set()
+
 
 # 1. PROCESS PDFS (Only runs once per upload)
 if uploaded_files:
@@ -172,6 +230,25 @@ if uploaded_files:
         
         # 1. Load the documents
         for uploaded_file in uploaded_files:
+
+            # LOGGING HOOK: Check before Uploading
+            # Initialize the set if it somehow doesn't exist
+            if "uploaded_to_cloud" not in st.session_state:
+                st.session_state.uploaded_to_cloud = set()
+
+            # ONLY upload if we haven't done so for this file yet
+            if uploaded_file.name not in st.session_state.uploaded_to_cloud:
+                uploaded_file.seek(0)
+                file_bytes = uploaded_file.read()
+                
+                cloud_logger.log_upload(file_bytes, uploaded_file.name)
+                
+                # Mark this file as "Done"
+                st.session_state.uploaded_to_cloud.add(uploaded_file.name)
+
+            uploaded_file.seek(0) # Reset again for the PyPDFLoader below
+            # ------------------------------------------
+
             temppdf = f"./temp.pdf"
             uploaded_file.seek(0)
             with open(temppdf, "wb") as file:   
@@ -294,6 +371,14 @@ if uploaded_files:
 
         user_input = st.text_input("Your question:")
         if user_input:
+            
+            # We get the list of currently active files from the session state
+            current_files = st.session_state.get("processed_file_list", [])
+
+            # Pass that list to the logger
+            cloud_logger.log_question(user_input, session_id, current_files)
+            # ---------------------------------------------
+
             session_history = get_session_history(session_id)
             response = conversational_rag_chain.invoke(
                 {"input": user_input},
